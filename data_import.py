@@ -8,6 +8,7 @@ import os
 import logging
 import yaml
 import openpyxl
+from sqlalchemy import create_engine
 
 def setupLogging():
     with open('log_configuration.yaml','r') as log_config:
@@ -20,34 +21,33 @@ logger.info('Logger initiated.')
 
 OUTPUT_PATH = 'imported_data' # Where to store downloaded data
 
-def extract_zip(file, extract_to):
-    """Recursive function to extract zip documents."""
-    file_names = []
 
-    def _extract_zip(file, current_path):
-        nonlocal file_names
-        # 
-        if isinstance(file, bytes):
+def extract_files(file, extract_location):
+    
+    file_list = []
+
+    def _extract_files(file, extract_location):
+        # Recursively loop through each file
+        if isinstance(file, bytes): 
             file_contents = BytesIO(file)
         else:
-            file_contents = os.path.join(current_path, file)
-            # logger.debug(file_contents)
-
+            file_contents = os.path.join(extract_location, file)
         with zipfile.ZipFile(file_contents) as zipref:
-            zipref.extractall(current_path)
+            zipref.extractall(extract_location)
             extracted_files = zipref.namelist()
-            for efile in extracted_files:
-                full_path = os.path.join(current_path, efile)
-                if efile.endswith('.zip'):
-                    try:
-                        file_names.extend(_extract_zip(efile, current_path))
-                    except TypeError:
-                        logger.warning(f'Error encountered unzipping {efile}')
-                else:
-                    file_names.append(full_path)
-        return file_names
 
-    return _extract_zip(file, extract_to)
+            for efile in extracted_files:
+                full_path = os.path.join(extract_location, efile)
+                if efile.endswith('.zip'): # zipfile found in unzipped file.
+                    try:
+                        file_list.extend(_extract_files(efile, extract_location))
+                    except:
+                        logging.error(efile)
+                else:
+                    file_list.append(full_path)
+        return file_list
+    return _extract_files(file, extract_location)
+
 
 
 def download_ridership_data(data_package):
@@ -68,7 +68,7 @@ def download_ridership_data(data_package):
         file_path = os.path.join(OUTPUT_PATH,file_name)
 
         if format == 'zip':
-            file_names.extend(extract_zip(response.content, file_path))
+            file_names.extend(extract_files(response.content, file_path))
 
         elif format == 'xlsx':
             with open(file_path,'wb') as file:
@@ -105,25 +105,51 @@ def get_data_package(url, params=None):
 
 def consolidate_ridership_data(file_name_list:list):
     # Loop through all folders and files and get all file names first
+    #TODO: Figure out how to deal with different columns across different files
+    # when consolidating files 
+    # Also figure out whether you need to loop through sheets in a particular book
+
     df_list = list()
-    master_df = pd.DataFrame()
+    bad_files = ['readme','-2014-2015'] # add file names here to exclude them from final df
+    search_cols = ['Trip Id', 
+                   'Trip  Duration', 
+                   'Start Station Id',	
+                   'Start Time', 
+                   'Start Station Name', 
+                   'End Station Id', 
+                   'End Time', 
+                   'End Station Name', 
+                   'Bike Id', 
+                   'User Type']
     for file_name in file_name_list:
         if not file_name.startswith(OUTPUT_PATH): file_name = os.path.join(OUTPUT_PATH, file_name)
         if file_name.endswith(('.xlsx','.xls','.csv')):
-            if file_name.endswith('.csv'):
-                logger.debug(file_name)
-                try:
-                    df = pd.read_csv(file_name, encoding='utf-8')
+            if  any([string in file_name for string in bad_files]):
+                continue 
+            elif file_name.endswith('.csv'):
+                try: # Some files have differnt encoding types.
+                    df = pd.read_csv(file_name, encoding='utf-8', usecols=lambda x: x in search_cols)
                 except UnicodeDecodeError:
-                    df = pd.read_csv(file_name, encoding='ISO-8859-1')
-                df_list.append(df)
+                    df = pd.read_csv(file_name, encoding='ISO-8859-1', usecols=lambda x: x in search_cols)
             elif file_name.endswith(('.xlsx','.xls')):
-                df_list.append(pd.read_excel(file_name))
+                excel_file = pd.ExcelFile(file_name)
+                sheets = excel_file.sheet_names
+                _df = []
+                for sheet in sheets:
+                    _df.append(excel_file.parse(sheet, usecols=lambda x: x in search_cols))
+                df = pd.concat(_df)
+            df_list.append(df)
         else:
             logger.debug(f'Ignoring {file_name}')
     logger.debug(f'df_list len: {len(df_list)}')
+    master_df = pd.concat(df_list)
     # Traverse through all files and consolidate into one master sheet
-    pass
+    logger.debug('Consolidation complete.')
+    return master_df
+
+def setup_db():
+    engine = create_engine('sqlite:///ridership_db.db',echo=False)
+    return engine
 
 def main():
     """
@@ -146,7 +172,17 @@ def main():
     download_station_data(station_data_pkg)
 
     # Create master ridership dataset
-    consolidate_ridership_data(file_names)   
+    master_df = consolidate_ridership_data(file_names)
+    logger.debug(f'Columns: {master_df.columns.to_list()}')
+    logger.debug(f'Number of rows {len(master_df)}')
+    logger.debug(master_df.info())
+    logger.debug(master_df.head(15))
+    #master_df.to_csv('final_df.csv')   
+
+    # Upload to sql db
+    con = setup_db()
+
+    master_df.to_sql('ridership_data', con=con, chunksize=10000)
 
 if __name__=='__main__':
     main()
