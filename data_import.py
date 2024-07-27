@@ -104,6 +104,7 @@ def get_data_package(url, params=None):
 
 
 def consolidate_ridership_data(file_name_list:list):
+    #TODO: consolidate column names
     # Loop through all folders and files and get all file names first
     #TODO: Figure out how to deal with different columns across different files
     # when consolidating files 
@@ -111,16 +112,22 @@ def consolidate_ridership_data(file_name_list:list):
 
     df_list = list()
     bad_files = ['readme','-2014-2015'] # add file names here to exclude them from final df
-    search_cols = ['Trip Id', 
-                   'Trip  Duration', 
-                   'Start Station Id',	
-                   'Start Time', 
-                   'Start Station Name', 
-                   'End Station Id', 
-                   'End Time', 
-                   'End Station Name', 
-                   'Bike Id', 
-                   'User Type']
+    search_cols = ['trip id', 
+                   'trip  duration', 
+                   'start station id',	
+                   'start time', 
+                   'start station name', 
+                   'end station id', 
+                   'end time', 
+                   'end station name', 
+                   'bike id', 
+                   'user type',
+                   'trip_id',
+                   'trip_start_time',
+                   'trip_stop_time'	,
+                   'trip_duration_seconds',
+                   'from_station_name',	
+                   'to_station_name	user_type']
     for file_name in file_name_list:
         if not file_name.startswith(OUTPUT_PATH): file_name = os.path.join(OUTPUT_PATH, file_name)
         if file_name.endswith(('.xlsx','.xls','.csv')):
@@ -130,13 +137,13 @@ def consolidate_ridership_data(file_name_list:list):
                 try: # Some files have differnt encoding types.
                     df = pd.read_csv(file_name, encoding='utf-8', usecols=lambda x: x in search_cols)
                 except UnicodeDecodeError:
-                    df = pd.read_csv(file_name, encoding='ISO-8859-1', usecols=lambda x: x in search_cols)
+                    df = pd.read_csv(file_name, encoding='ISO-8859-1', usecols=lambda x: x.lower() in search_cols)
             elif file_name.endswith(('.xlsx','.xls')):
                 excel_file = pd.ExcelFile(file_name)
                 sheets = excel_file.sheet_names
                 _df = []
                 for sheet in sheets:
-                    _df.append(excel_file.parse(sheet, usecols=lambda x: x in search_cols))
+                    _df.append(excel_file.parse(sheet, usecols=lambda x: x.lower() in search_cols))
                 df = pd.concat(_df)
             df_list.append(df)
         else:
