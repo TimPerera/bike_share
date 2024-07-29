@@ -50,23 +50,23 @@ def extract_files(file, extract_location):
 
 
 
-def download_ridership_data(data_package):
+def download_ridership_data(data_package, specific_files = None):
     """
     Imports ridership data. Returns a list of all the file names imported.
     """
     errors = 0
     file_names = []
     for resource in data_package['result']['resources']:
+        response = requests.get(link, stream=True)
         link = resource['url']
+        file_name = response['name']
         format = resource['format'].lower()
         
-        response = requests.get(link, stream=True)
+        if specific_files and any([re.search(x, file_name) is not None for x in specific_files]):
+            print(f'{file_name} found.')
         
-        pattern = '^.*/download/([^/]+)$'
-        match = re.match(pattern, link)
-        file_name = match[1]
         file_path = os.path.join(OUTPUT_PATH,file_name)
-
+        
         if format == 'zip':
             file_names.extend(extract_files(response.content, file_path))
 
@@ -94,14 +94,10 @@ def get_data_package(url, params=None):
     
     try:
         response = requests.get(url, params=params)
+        logger.debug(response)
     except Exception as e:
         raise(e)
     return response.json()
-
-# def fetch_files(file_list):
-#     for file in file_list:
-#         if file
-
 
 def consolidate_ridership_data(file_name_list:list):
     #TODO: consolidate column names
@@ -109,7 +105,6 @@ def consolidate_ridership_data(file_name_list:list):
     #TODO: Figure out how to deal with different columns across different files
     # when consolidating files 
     # Also figure out whether you need to loop through sheets in a particular book
-
     df_list = list()
     bad_files = ['readme','-2014-2015'] # add file names here to exclude them from final df
     search_cols = ['trip id', 
@@ -174,6 +169,7 @@ def main():
 
     # Import data
     rider_data_pkg = get_data_package(rdata_url, params)
+    return rider_data_pkg
     station_data_pkg = get_data_package(sdata_url)
     file_names = download_ridership_data(rider_data_pkg)
     download_station_data(station_data_pkg)
@@ -184,12 +180,10 @@ def main():
     logger.debug(f'Number of rows {len(master_df)}')
     logger.debug(master_df.info())
     logger.debug(master_df.head(15))
-    #master_df.to_csv('final_df.csv')   
 
     # Upload to sql db
     con = setup_db()
-
     master_df.to_sql('ridership_data', con=con, chunksize=10000)
 
 if __name__=='__main__':
-    main()
+    data = main()
