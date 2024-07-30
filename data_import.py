@@ -1,86 +1,53 @@
-import logging.config
+
 import requests
 import pandas as pd
-import zipfile
-from io import BytesIO
 import re
 import os
-import logging
-import yaml
-import openpyxl
-from sqlalchemy import create_engine
 
-def setupLogging():
-    with open('log_configuration.yaml','r') as log_config:
-        config = yaml.safe_load(log_config)
-        logging.config.dictConfig(config)
-
-setupLogging()
-logger = logging.getLogger('basic')
-logger.info('Logger initiated.')
+from utils import logger, extract_files, setup_db
 
 OUTPUT_PATH = 'imported_data' # Where to store downloaded data
 
-
-def extract_files(file, extract_location):
-    
-    file_list = []
-
-    def _extract_files(file, extract_location):
-        # Recursively loop through each file
-        if isinstance(file, bytes): 
-            file_contents = BytesIO(file)
-        else:
-            file_contents = os.path.join(extract_location, file)
-        with zipfile.ZipFile(file_contents) as zipref:
-            zipref.extractall(extract_location)
-            extracted_files = zipref.namelist()
-
-            for efile in extracted_files:
-                full_path = os.path.join(extract_location, efile)
-                if efile.endswith('.zip'): # zipfile found in unzipped file.
-                    try:
-                        file_list.extend(_extract_files(efile, extract_location))
-                    except:
-                        logging.error(efile)
-                else:
-                    file_list.append(full_path)
-        return file_list
-    return _extract_files(file, extract_location)
-
-
-
-def download_ridership_data(data_package, specific_files = None):
+def download_ridership_data(data_package, required_files = []):
     """
-    Imports ridership data. Returns a list of all the file names imported.
+    Imports ridership data. Returns a list of all the resources names imported.
     """
     errors = 0
-    file_names = []
+    downloaded_files = []
+
     for resource in data_package['result']['resources']:
-        response = requests.get(link, stream=True)
         link = resource['url']
-        file_name = response['name']
-        format = resource['format'].lower()
+        response = requests.get(link, stream=True)
         
-        if specific_files and any([re.search(x, file_name) is not None for x in specific_files]):
-            print(f'{file_name} found.')
+        file_name = resource['name']
+        file_format = resource['format'].lower()
+        # bool tests that acts as filters
+        match_found = any([re.search(x, file_name) is not None for x in required_files])
         
+        # if required_files is defined but curr resource does not appear in this list then skip
+        if required_files and not match_found:
+            continue
+
+        # else download, because either:
+        # required_files has been defined, but the current resource is not what we are looking for
+        # OR the required_files is not defined, in which case we want to download the current file
+
         file_path = os.path.join(OUTPUT_PATH,file_name)
         
-        if format == 'zip':
-            file_names.extend(extract_files(response.content, file_path))
+        if file_format == 'zip':
+            downloaded_files.extend(extract_files(response.content, file_path))
 
-        elif format == 'xlsx':
-            with open(file_path,'wb') as file:
+        elif file_format in ['xlsx','xls']:
+            with open(file_path+'.xlsx','wb') as file:
                 file.write(response.content)
-                file_names.append(file_name)
-
+                downloaded_files.append({'name':file_name, 'format':file_format})
         else:
-            print('Missing file handler for type',format)
+            logger.debug(f'Missing file handler for type {file_format}')
             errors += 1 
-    data_file_len = len(data_package['result']['resources'])
-    logger.info(f'Downloaded {data_file_len-errors} files. {errors} errors detected during download.')
-    return file_names
+    #data_file_len = len(data_package['result']['resources'])
+    #logger.info(f'Downloaded {data_file_len-errors} files. {errors} errors detected during download.')
+            
+    return downloaded_files
 
 def download_station_data(station_data_pkg):
     """
@@ -94,19 +61,18 @@ def get_data_package(url, params=None):
     
     try:
         response = requests.get(url, params=params)
-        logger.debug(response)
     except Exception as e:
         raise(e)
     return response.json()
 
-def consolidate_ridership_data(file_name_list:list):
+def consolidate_ridership_data(downloaded_files:list):
     #TODO: consolidate column names
     # Loop through all folders and files and get all file names first
     #TODO: Figure out how to deal with different columns across different files
     # when consolidating files 
-    # Also figure out whether you need to loop through sheets in a particular book
     df_list = list()
-    bad_files = ['readme','-2014-2015'] # add file names here to exclude them from final df
+    bad_files = ['readme'] # do not download list
+    bad_formats = ['docx']
     search_cols = ['trip id', 
                    'trip  duration', 
                    'start station id',	
@@ -122,19 +88,29 @@ def consolidate_ridership_data(file_name_list:list):
                    'trip_stop_time'	,
                    'trip_duration_seconds',
                    'from_station_name',	
-                   'to_station_name	user_type']
-    for file_name in file_name_list:
-        if not file_name.startswith(OUTPUT_PATH): file_name = os.path.join(OUTPUT_PATH, file_name)
-        if file_name.endswith(('.xlsx','.xls','.csv')):
-            if  any([string in file_name for string in bad_files]):
-                continue 
-            elif file_name.endswith('.csv'):
+                   'to_station_name	user_type'
+                   ]
+    for file in downloaded_files:
+        file_name = file['name']
+        file_format = file['format'].lower()
+        bad_file_found = file_name in bad_files
+        bad_format_found = file_format in bad_formats
+        if any([bad_file_found, bad_format_found]):
+            continue
+        if not file_name.startswith(OUTPUT_PATH): 
+            full_fname = os.path.join(OUTPUT_PATH, file_name +'.' + file_format)
+        else:
+            full_fname = full_fname = file_name + '.' + file_format
+        logger.debug(f'full_fname:{full_fname}')
+
+        if file_format in ['xlsx','xls','csv']:
+            if file_format == 'csv':
                 try: # Some files have differnt encoding types.
-                    df = pd.read_csv(file_name, encoding='utf-8', usecols=lambda x: x in search_cols)
+                    df = pd.read_csv(full_fname, encoding='utf-8', usecols=lambda x: x.lower() in search_cols)
                 except UnicodeDecodeError:
-                    df = pd.read_csv(file_name, encoding='ISO-8859-1', usecols=lambda x: x.lower() in search_cols)
-            elif file_name.endswith(('.xlsx','.xls')):
-                excel_file = pd.ExcelFile(file_name)
+                    df = pd.read_csv(full_fname, encoding='ISO-8859-1', usecols=lambda x: x.lower() in search_cols)
+            elif file_format in ['xlsx','xls']:
+                excel_file = pd.ExcelFile(full_fname)
                 sheets = excel_file.sheet_names
                 _df = []
                 for sheet in sheets:
@@ -142,16 +118,15 @@ def consolidate_ridership_data(file_name_list:list):
                 df = pd.concat(_df)
             df_list.append(df)
         else:
-            logger.debug(f'Ignoring {file_name}')
+            if os.path.isdir(full_fname):
+                logger.debug(f'Ignoring {full_fname} as it is a directory.')
+            else:
+                logger.debug(f"Ignoring {full_fname} as it is an unexpected format: {file['format']}. Check file extension.")
     logger.debug(f'df_list len: {len(df_list)}')
     master_df = pd.concat(df_list)
     # Traverse through all files and consolidate into one master sheet
-    logger.debug('Consolidation complete.')
+    logger.info('Consolidation complete.')
     return master_df
-
-def setup_db():
-    engine = create_engine('sqlite:///ridership_db.db',echo=False)
-    return engine
 
 def main():
     """
@@ -168,10 +143,10 @@ def main():
     sdata_url = "https://tor.publicbikesystem.net/ube/gbfs/v1/en/station_information"
 
     # Import data
+    #required_files = ['2022','2023'] # limits the files that are downloaded, acts as a filter.
     rider_data_pkg = get_data_package(rdata_url, params)
-    return rider_data_pkg
     station_data_pkg = get_data_package(sdata_url)
-    file_names = download_ridership_data(rider_data_pkg)
+    file_names = download_ridership_data(rider_data_pkg)#, required_files=required_files)
     download_station_data(station_data_pkg)
 
     # Create master ridership dataset
@@ -179,11 +154,15 @@ def main():
     logger.debug(f'Columns: {master_df.columns.to_list()}')
     logger.debug(f'Number of rows {len(master_df)}')
     logger.debug(master_df.info())
-    logger.debug(master_df.head(15))
+    logger.debug(master_df.head(5))
 
     # Upload to sql db
     con = setup_db()
-    master_df.to_sql('ridership_data', con=con, chunksize=10000)
+    try:
+        master_df.to_sql('ridership_data', con=con, chunksize=10000, if_exists='replace')
+    except Exception as e:
+        logger.error(e)
+    
 
 if __name__=='__main__':
     data = main()
