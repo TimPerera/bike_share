@@ -65,6 +65,25 @@ def get_data_package(url, params=None):
         raise(e)
     return response.json()
 
+def validate_data(df:pd.DataFrame):
+    """Fix common data issues with dataframe that has been downloaded. 
+    For now, this includes fixing the column names to follow the standard, and fix the 
+    inconsistency observed in the timestamp. 
+    """
+    df = df.rename(columns={'trip_id':'trip id',
+                       'trip_start_time': 'start time',
+                       'trip_stop_time':'end time',
+                       'trip_duration_seconds':'trip duration',
+                       'from_station_name':'start station name',
+                       'to_station_name':'end station name',
+                       'user_type':'user type'
+                       })
+    #logger.debug(df.loc[:5, 'start time'])
+    df['start time'] = pd.to_datetime(df['start time'])
+    df['end time'] = pd.to_datetime(df['end time'])
+    return df
+
+
 def consolidate_ridership_data(downloaded_files:list):
     #TODO: consolidate column names
     # Loop through all folders and files and get all file names first
@@ -88,7 +107,8 @@ def consolidate_ridership_data(downloaded_files:list):
                    'trip_stop_time'	,
                    'trip_duration_seconds',
                    'from_station_name',	
-                   'to_station_name	user_type'
+                   'to_station_name',
+                   'user_type'
                    ]
     for file in downloaded_files:
         file_name = file['name']
@@ -115,6 +135,7 @@ def consolidate_ridership_data(downloaded_files:list):
                 _df = []
                 for sheet in sheets:
                     _df.append(excel_file.parse(sheet, usecols=lambda x: x.lower() in search_cols))
+                    logger.debug(_df)
                 df = pd.concat(_df)
             df_list.append(df)
         else:
@@ -124,9 +145,10 @@ def consolidate_ridership_data(downloaded_files:list):
                 logger.debug(f"Ignoring {full_fname} as it is an unexpected format: {file['format']}. Check file extension.")
     logger.debug(f'df_list len: {len(df_list)}')
     master_df = pd.concat(df_list)
+    master_df_validated = validate_data(master_df)
     # Traverse through all files and consolidate into one master sheet
     logger.info('Consolidation complete.')
-    return master_df
+    return master_df_validated
 
 def main():
     """
@@ -143,10 +165,10 @@ def main():
     sdata_url = "https://tor.publicbikesystem.net/ube/gbfs/v1/en/station_information"
 
     # Import data
-    #required_files = ['2022','2023'] # limits the files that are downloaded, acts as a filter.
+    required_files = ['2016'] # limits the files that are downloaded, acts as a filter.
     rider_data_pkg = get_data_package(rdata_url, params)
     station_data_pkg = get_data_package(sdata_url)
-    file_names = download_ridership_data(rider_data_pkg)#, required_files=required_files)
+    file_names = download_ridership_data(rider_data_pkg, required_files=required_files)
     download_station_data(station_data_pkg)
 
     # Create master ridership dataset
@@ -166,3 +188,6 @@ def main():
 
 if __name__=='__main__':
     data = main()
+
+
+# TODO: file 2016 is causing problems when uploadiing to sql db. Check timestamp
