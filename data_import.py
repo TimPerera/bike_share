@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import re
 import os
+import numpy as np
 
 from utils import logger, extract_files, setup_db
 
@@ -70,6 +71,7 @@ def validate_data(df:pd.DataFrame):
     For now, this includes fixing the column names to follow the standard, and fix the 
     inconsistency observed in the timestamp. 
     """
+    df.columns = df.columns.str.lower()
     df = df.rename(columns={'trip_id':'trip id',
                        'trip_start_time': 'start time',
                        'trip_stop_time':'end time',
@@ -79,8 +81,37 @@ def validate_data(df:pd.DataFrame):
                        'user_type':'user type'
                        })
     #logger.debug(df.loc[:5, 'start time'])
-    df['start time'] = pd.to_datetime(df['start time'])
-    df['end time'] = pd.to_datetime(df['end time'])
+    try:
+        
+        df['start time'] = pd.to_datetime(df['start time'])
+        df['end time'] = pd.to_datetime(df['end time'])
+        mask_start_station_name_null = df['start station name'].upper()=='NULL'
+        mask_end_station_name_null = df['end station name'].upper()=='NULL'
+        mask_start_station_id = df['start station id'].upper()=='NULL'
+        mask_end_station_id = df['end station id'].upper()=='NULL'
+        non_int_mask_end_station = df['end station id'].apply(lambda x: np.isnan(x))
+        non_int_mask_start_station = df['start station id'].apply(lambda x: np.isnan(x))
+        
+        combined_mask = (mask_start_station_name_null|
+                         mask_end_station_name_null|
+                         mask_start_station_id|
+                         mask_end_station_id|
+                         non_int_mask_end_station|
+                         non_int_mask_start_station)
+        
+        df = df[~combined_mask]
+
+        df = df.dropna(subset=['start station name',
+                          'end station name', 
+                          'start station id',
+                          'end station id'], 
+                  how='all')
+        
+        df['end station id'] = df['end station id'].astype(int)
+        df['start station id'] = df['start station id'].astype(int)
+
+    except Exception as e:
+        logger.error(f'Problem detected when applying column corrections. {e}')
     return df
 
 
@@ -121,7 +152,7 @@ def consolidate_ridership_data(downloaded_files:list):
             full_fname = os.path.join(OUTPUT_PATH, file_name +'.' + file_format)
         else:
             full_fname = full_fname = file_name + '.' + file_format
-        logger.debug(f'full_fname:{full_fname}')
+        # logger.debug(f'full_fname:{full_fname}')
 
         if file_format in ['xlsx','xls','csv']:
             if file_format == 'csv':
@@ -143,7 +174,6 @@ def consolidate_ridership_data(downloaded_files:list):
                 logger.debug(f'Ignoring {full_fname} as it is a directory.')
             else:
                 logger.debug(f"Ignoring {full_fname} as it is an unexpected format: {file['format']}. Check file extension.")
-    logger.debug(f'df_list len: {len(df_list)}')
     master_df = pd.concat(df_list)
     master_df_validated = validate_data(master_df)
     # Traverse through all files and consolidate into one master sheet
@@ -165,7 +195,7 @@ def main():
     sdata_url = "https://tor.publicbikesystem.net/ube/gbfs/v1/en/station_information"
 
     # Import data
-    required_files = ['2016'] # limits the files that are downloaded, acts as a filter.
+    required_files = ['2022','2023'] # limits the files that are downloaded, acts as a filter.
     rider_data_pkg = get_data_package(rdata_url, params)
     station_data_pkg = get_data_package(sdata_url)
     file_names = download_ridership_data(rider_data_pkg, required_files=required_files)
@@ -173,10 +203,8 @@ def main():
 
     # Create master ridership dataset
     master_df = consolidate_ridership_data(file_names)
-    logger.debug(f'Columns: {master_df.columns.to_list()}')
     logger.debug(f'Number of rows {len(master_df)}')
-    logger.debug(master_df.info())
-    logger.debug(master_df.head(5))
+    # logger.debug(master_df.info())
 
     # Upload to sql db
     con = setup_db()
